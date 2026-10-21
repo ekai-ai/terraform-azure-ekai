@@ -1,0 +1,192 @@
+name: Deploy ${repo.name} (${env_name})
+
+# Manual trigger only — no auto-build on push. Run from GitHub UI or `gh` CLI.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or commit SHA to build and deploy from (e.g. main, v1.2.0, abc1234).'
+        required: true
+        type: string
+
+permissions:
+  id-token: write   # required for Azure/AWS OIDC federation (azure/login, configure-aws-credentials)
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${repo.repo_env}
+    steps:
+      - name: Checkout source (ref selected at dispatch)
+        uses: actions/checkout@v4
+        with:
+          ref: $${{ inputs.ref }}
+
+      # ── Registry authentication ─────────────────────────────────────────────
+%{ if registries.azure.enabled ~}
+      - name: Login to Azure via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: $${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: $${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: $${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to Container Registry
+        run: |
+          REGISTRY="$${{ secrets.AZURE_ACR_LOGIN_SERVER }}"
+          if [[ "$$REGISTRY" == *".pkg.dev"* ]]; then
+            # GCP Artifact Registry — use GCP_SA_KEY secret (SA JSON key)
+            echo "$${{ secrets.GCP_SA_KEY }}" > /tmp/gcp-key.json
+            gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+            gcloud auth configure-docker "$$(echo "$$REGISTRY" | cut -d'/' -f1)" --quiet
+            rm /tmp/gcp-key.json
+          else
+            # Azure ACR
+            az acr login --name "$$(echo "$$REGISTRY" | cut -d'.' -f1)"
+          fi
+%{ endif ~}
+%{ if registries.dockerhub.enabled ~}
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: $${{ secrets.DOCKERHUB_USERNAME }}
+          password: $${{ secrets.DOCKERHUB_TOKEN }}
+%{ endif ~}
+%{ if registries.aws_ecr.enabled ~}
+      - name: Configure AWS credentials (ECR push)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: $${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+          aws-secret-access-key: $${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+          aws-region: ${aws_ecr_region}
+
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@v2
+%{ endif ~}
+
+      # ── Build + push ────────────────────────────────────────────────────────
+      # No .env generation here — secrets are injected into the pod at runtime
+      # by External Secrets Operator (ESO) reading from Azure Key Vault.
+      # Image stays clean: no plaintext secrets baked in at build time.
+      - name: Set image tag
+        # Use the SHA of whatever was actually checked out, not GITHUB_SHA
+        # (which reflects the triggering ref, not the manually-dispatched ref).
+        run: echo "IMAGE_TAG=$(git rev-parse --short=7 HEAD)" >> $GITHUB_ENV
+
+      # Marker .env so the app loads its config from Azure Key Vault via ESO
+      # at runtime instead of expecting a baked-in .env. The image still needs
+      # the file to exist in the build context (Dockerfile COPYs it).
+      - name: Create .env file
+        working-directory: ${repo.image_path}
+        run: echo "env=azure_kv" > .env
+
+      - name: Build image
+        # Build context = ${repo.image_path}; Dockerfile = ${repo.dockerfile}
+        # (relative to image_path). Each repo can have its own layout — see
+        # cd_repos in tfvars.
+        working-directory: ${repo.image_path}
+        run: |
+          set -euo pipefail
+          docker build -f ${repo.dockerfile} . -t local/ekai${repo.name}:$${IMAGE_TAG}
+
+%{ if registries.azure.enabled ~}
+      - name: Push to Azure ACR
+        run: |
+          set -euo pipefail
+          docker tag local/ekai${repo.name}:$${IMAGE_TAG} $${{ secrets.AZURE_ACR_LOGIN_SERVER }}/ekai${repo.name}:$${IMAGE_TAG}
+          docker push $${{ secrets.AZURE_ACR_LOGIN_SERVER }}/ekai${repo.name}:$${IMAGE_TAG}
+%{ endif ~}
+%{ if registries.dockerhub.enabled ~}
+      - name: Push to DockerHub
+        run: |
+          set -euo pipefail
+          docker tag local/ekai${repo.name}:$${IMAGE_TAG} ${dockerhub_namespace}/ekai${repo.name}:$${IMAGE_TAG}
+          docker push ${dockerhub_namespace}/ekai${repo.name}:$${IMAGE_TAG}
+%{ endif ~}
+%{ if registries.aws_ecr.enabled ~}
+      - name: Push to AWS ECR
+        run: |
+          set -euo pipefail
+          docker tag local/ekai${repo.name}:$${IMAGE_TAG} ${aws_ecr_registry_url}/ekai${repo.name}:$${IMAGE_TAG}
+          docker push ${aws_ecr_registry_url}/ekai${repo.name}:$${IMAGE_TAG}
+%{ endif ~}
+
+      # ── Update manifests repo (ArgoCD picks it up and syncs) ────────────────
+      - name: Checkout manifests repo
+        uses: actions/checkout@v4
+        with:
+          repository: "${github_owner}/${manifests_reponame}"
+          ref: ${manifests_branch}
+          path: ${manifests_path}
+          token: $${{ secrets.org_token_github }}
+
+      - name: Update manifest (placeholders + image tag), push
+        run: |
+          set -euo pipefail
+          cd ${manifests_path}
+
+          # Single source of truth for the env name → all known placeholder
+          # styles substitute to this. Add new placeholders below as needed.
+          ENV="${env_name}"
+          TARGET="${manifests_path}/${repo.deployment_yaml}"
+
+          # ── Env-name placeholders ─────────────────────────────────────────
+          # Supports multiple conventions so manifests can use any of:
+          #   <env>           ← short form (most concise)
+          #   <env_name>      ← full var name, explicit
+          #   {{env}}         ← handlebars-ish
+          # If you add a new placeholder, follow the same `sed` pattern below.
+          # All of these substitute to ENV (= the env_name passed by Terraform
+          # at workflow render time, e.g. `client1`, `dev`, `prod`).
+          sed -i \
+            -e "s|<env>|$${ENV}|g" \
+            -e "s|<env_name>|$${ENV}|g" \
+            -e "s|{{env}}|$${ENV}|g" \
+            "$${TARGET}"
+
+          # ── (Future) other dynamic placeholders ───────────────────────────
+          # Add lines here when manifests need substitutions for new vars
+          # (e.g. <region>, <acr_host>, <namespace>). Each gets a Terraform
+          # template var passed in from main.tf's templatefile() call.
+          # Example:
+          #   sed -i "s|<region>|${env_name}_region_placeholder|g" "$${TARGET}"
+
+          # ── Image tag (always last so other subs don't accidentally hit it) ─
+          sed -i "s|image:.*|image: ${primary_image_prefix}/ekai${repo.name}:$${IMAGE_TAG}|" "$${TARGET}"
+
+          git config user.name "${github_username}"
+          git config user.email "${github_email}"
+          git commit -am "Deploy ekai${repo.name}:$${IMAGE_TAG}" || { echo "::notice::No manifest change — image tag unchanged."; exit 0; }
+          git push origin ${manifests_branch}
+
+      # ── Slack notification (opt-in) ─────────────────────────────────────────
+      # Set the GitHub Environment secret SLACK_WEBHOOK_URL (an Incoming Webhook
+      # URL — see https://api.slack.com/messaging/webhooks). If unset, this
+      # step exits silently. Runs on success AND failure so the channel sees
+      # both deploys and broken builds.
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: $${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: $${{ job.status }}
+          IMAGE_REF: "${primary_image_prefix}/ekai${repo.name}:$${IMAGE_TAG}"
+          RUN_URL: "https://github.com/$${{ github.repository }}/actions/runs/$${{ github.run_id }}"
+          DISPATCHED_REF: $${{ inputs.ref }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::notice::SLACK_WEBHOOK_URL not set on environment ${repo.repo_env} — skipping Slack notification."
+            exit 0
+          fi
+          case "$JOB_STATUS" in
+            success)   EMOJI=":white_check_mark:" ;;
+            failure)   EMOJI=":x:" ;;
+            cancelled) EMOJI=":warning:" ;;
+            *)         EMOJI=":grey_question:" ;;
+          esac
+          PAYLOAD=$(jq -n \
+            --arg text "$EMOJI *${repo.name}* (${env_name}) — \`$IMAGE_REF\` — ref \`$DISPATCHED_REF\` — *$JOB_STATUS*\n<$RUN_URL|View workflow run>" \
+            '{text: $text}')
+          curl -sS -X POST -H 'Content-Type: application/json' \
+            --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" >/dev/null
+          echo "::notice::Slack notified ($JOB_STATUS)."

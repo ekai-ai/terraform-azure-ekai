@@ -153,6 +153,12 @@ variable "sku_tier" {
   default     = "Standard"
 }
 
+variable "zones" {
+  description = "Availability zones for both AKS node pools -- spreads nodes so a single zone outage doesn't take the whole pool down. Defaults to all three; not every Azure region supports availability zones -- set to [] for one that doesn't (an unsupported zone number fails the apply outright, it does not silently fall back)."
+  type        = list(string)
+  default     = ["1", "2", "3"]
+}
+
 variable "node_count" {
   type = number
 }
@@ -207,18 +213,28 @@ variable "postgresql_version" {
 }
 
 variable "postgres_flexible_server_sku_name" {
+  # GP (General Purpose), not Burstable -- Burstable doesn't support HA at
+  # all, and this repo defaults enable_ha = true below. Override to a
+  # Burstable SKU only for a non-prod env, alongside enable_ha = false.
   type    = string
-  default = "B_Standard_B1ms"
+  default = "GP_Standard_D2s_v3"
 }
 
 variable "postgres_flexible_server_storage_mb" {
   type    = number
-  default = 32768
+  default = 65536
 }
 
 variable "enable_ha" {
-  type    = bool
-  default = false
+  description = "Enable PostgreSQL zone-redundant HA (standby in a different availability zone). Requires a General Purpose/Memory Optimized SKU -- not available on Burstable. Defaults to true -- this repo is for production client deployments; set false for a cheaper non-prod env (alongside a Burstable postgres_flexible_server_sku_name)."
+  type        = bool
+  default     = true
+}
+
+variable "geo_redundant_backup_enabled" {
+  description = "Copy PostgreSQL backups to the paired region, protecting against a full primary-region outage. Roughly doubles backup storage cost. Defaults to true for the same reason as enable_ha."
+  type        = bool
+  default     = true
 }
 
 variable "create_acr" {

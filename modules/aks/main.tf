@@ -41,6 +41,14 @@ resource "azurerm_kubernetes_cluster" "aks" {
     min_count                    = var.system_node_pool_min_count
     auto_scaling_enabled         = true
     temporary_name_for_rotation  = "systemtemp"
+    # Without this, every node (across the whole min/max autoscaling range)
+    # can land in a single availability zone -- an outage of just that one
+    # zone takes the entire pool down together. var.zones defaults to all
+    # three, but must be set to [] for regions with no zone support (not all
+    # Azure regions have them -- verify the target region before applying;
+    # an unsupported zone number fails the apply outright, it doesn't
+    # silently ignore it).
+    zones = var.zones
     upgrade_settings {
       max_surge = "60%"
     }
@@ -115,6 +123,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "apps" {
   max_count              = var.app_node_pool_max_count
   min_count              = var.app_node_pool_min_count
   auto_scaling_enabled   = true
+  zones                  = var.zones
   node_labels = {
     "workload" = "app"
   }

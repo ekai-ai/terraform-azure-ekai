@@ -54,6 +54,11 @@ cluster_version = "1.34.1"
 node_count      = 4
 vm_size         = "Standard_B2ms"
 
+# zones defaults to ["1", "2", "3"] (all node pools spread across all three)
+# -- not every Azure region supports availability zones. Verify the target
+# region does before applying (an unsupported zone number fails the apply
+# outright); set zones = [] here if it doesn't.
+
 system_node_pool_min_count = 1
 system_node_pool_max_count = 3
 # VM SKU + scaling for the app (user) node pool where all workloads run.
@@ -76,7 +81,8 @@ log_analytics_workspace_name = "ekaiaksworkspace-customer"
 postgres_flexible_server_sku_name   = "GP_Standard_D2s_v3"
 postgres_flexible_server_storage_mb = 65536
 postgresql_version                  = "15"
-enable_ha                           = true # roughly doubles Postgres cost -- set false for non-prod envs
+enable_ha                           = true # zone-redundant standby -- roughly doubles Postgres cost, set false for non-prod envs
+geo_redundant_backup_enabled        = true # cross-region backup copy -- also roughly doubles backup storage cost
 
 # ─── ACR ───────────────────────────────────────────────────────────────────────
 create_acr = true

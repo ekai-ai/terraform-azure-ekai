@@ -73,6 +73,7 @@ module "aks" {
   vm_size                    = var.vm_size
   cluster_version            = var.cluster_version
   sku_tier                   = var.sku_tier
+  zones                      = var.zones
   vnet_subnet_id             = module.vnet.private_subnet_ids
   resource_group_name        = var.resource_group_name
   log_analytics_workspace_id = module.log_analytics_workspace.id
@@ -146,6 +147,7 @@ module "postgresql_server" {
   resource_group_name                 = var.resource_group_name
   postgresql_version                  = var.postgresql_version
   enable_ha                           = var.enable_ha
+  geo_redundant_backup_enabled        = var.geo_redundant_backup_enabled
   env_name                            = var.env_name
   backend_db_username                 = local.backend_db_username
   backend_db_password                 = local.backend_db_password

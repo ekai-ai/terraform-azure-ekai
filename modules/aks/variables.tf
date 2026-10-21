@@ -23,6 +23,12 @@ variable "region" {
   type        = string
 }
 
+variable "zones" {
+  description = "Availability zones for both node pools -- spreads nodes across zones so a single zone outage doesn't take the whole pool down. Defaults to all three, but not every Azure region supports availability zones; set this to [] for a region that doesn't (verify with `az vm list-skus --location <region> --zone --output table` -- applying with a zone number a region doesn't support fails outright, it does not silently fall back)."
+  type        = list(string)
+  default     = ["1", "2", "3"]
+}
+
 variable "resource_group_name" {
   description = "Resource group that owns the AKS cluster."
   type        = string

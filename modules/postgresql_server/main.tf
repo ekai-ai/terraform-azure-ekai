@@ -26,19 +26,35 @@ resource "azurerm_postgresql_flexible_server" "ekai-db" {
   private_dns_zone_id = azurerm_private_dns_zone.ekai-db.id
   sku_name            = var.postgres_flexible_server_sku_name
   zone                = var.enable_ha ? "1" : null
+  # "ZoneRedundant" (not "SameZone"): the standby lives in a DIFFERENT zone
+  # from the primary (standby_availability_zone = "2" vs. primary zone "1"
+  # above), so a single zone outage doesn't take out both. "SameZone" HA
+  # only protects against hardware/VM failure within one zone -- it does
+  # nothing for a zone-wide outage, which defeats the point of paying for HA
+  # on something described as production infrastructure. Only General
+  # Purpose/Memory Optimized SKUs support either HA mode -- the Burstable
+  # tier (postgres_flexible_server_sku_name's cheaper options) supports
+  # neither, so enable_ha = true requires a non-Burstable SKU (see
+  # env/customer.tfvars's own postgres_flexible_server_sku_name comment).
   dynamic "high_availability" {
     for_each = var.enable_ha ? [1] : []
     content {
-      mode                      = "SameZone"
+      mode                      = "ZoneRedundant"
       standby_availability_zone = "2"
     }
   }
-  storage_mb             = var.postgres_flexible_server_storage_mb
-  backup_retention_days  = 7
-  auto_grow_enabled      = true
-  administrator_login    = var.backend_db_username
-  administrator_password = var.backend_db_password
-  version                = var.postgresql_version
+  storage_mb            = var.postgres_flexible_server_storage_mb
+  backup_retention_days = 7
+  # Cross-region copy of backups -- protects against the whole PRIMARY
+  # REGION being unavailable, not just a zone within it (ZoneRedundant HA
+  # above only covers the latter). Roughly doubles backup storage cost, same
+  # tradeoff class as HA itself -- default false, set true for a real
+  # production deployment (see env/customer.tfvars).
+  geo_redundant_backup_enabled = var.geo_redundant_backup_enabled
+  auto_grow_enabled            = true
+  administrator_login          = var.backend_db_username
+  administrator_password       = var.backend_db_password
+  version                      = var.postgresql_version
 
   public_network_access_enabled = false
 

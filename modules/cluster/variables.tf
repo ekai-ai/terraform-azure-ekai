@@ -59,6 +59,12 @@ variable "sku_tier" {
   default     = "Standard"
 }
 
+variable "zones" {
+  description = "Availability zones for both AKS node pools. Defaults to all three; set to [] for a region with no zone support."
+  type        = list(string)
+  default     = ["1", "2", "3"]
+}
+
 variable "node_count" {
   type = number
 }
@@ -121,7 +127,12 @@ variable "postgres_flexible_server_storage_mb" {
 
 variable "enable_ha" {
   type    = bool
-  default = false
+  default = true
+}
+
+variable "geo_redundant_backup_enabled" {
+  type    = bool
+  default = true
 }
 
 # --- Key Vault ---

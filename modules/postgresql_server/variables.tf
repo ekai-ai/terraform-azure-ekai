@@ -39,7 +39,13 @@ variable "postgres_flexible_server_storage_mb" {
 }
 
 variable "enable_ha" {
-  description = "Enable PostgreSQL high availability (SameZone standby replica)."
+  description = "Enable PostgreSQL zone-redundant high availability (standby replica in a different availability zone from the primary). Requires a General Purpose or Memory Optimized SKU -- not available on Burstable."
+  type        = bool
+  default     = true
+}
+
+variable "geo_redundant_backup_enabled" {
+  description = "Copy backups to the paired region, protecting against a full primary-region outage (not just a zone within it, which enable_ha covers). Roughly doubles backup storage cost."
   type        = bool
   default     = true
 }

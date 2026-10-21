@@ -81,6 +81,7 @@ module "cluster" {
   cluster_name                        = var.cluster_name
   cluster_version                     = var.cluster_version
   sku_tier                            = var.sku_tier
+  zones                               = var.zones
   node_count                          = var.node_count
   vm_size                             = var.vm_size
   system_node_pool_min_count          = var.system_node_pool_min_count
@@ -94,6 +95,7 @@ module "cluster" {
   postgres_flexible_server_sku_name   = var.postgres_flexible_server_sku_name
   postgres_flexible_server_storage_mb = var.postgres_flexible_server_storage_mb
   enable_ha                           = var.enable_ha
+  geo_redundant_backup_enabled        = var.geo_redundant_backup_enabled
   key_vault_name                      = local.key_vault_name
   secrets_name                        = local.secrets_name
   rbac_principal_ids                  = var.rbac_principal_ids

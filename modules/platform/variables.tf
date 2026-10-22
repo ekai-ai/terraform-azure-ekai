@@ -158,12 +158,6 @@ variable "eso_chart_version" {
   default     = "0.10.7"
 }
 
-variable "keda_chart_version" {
-  description = "KEDA Helm chart version."
-  type        = string
-  default     = "2.16.0"
-}
-
 variable "redis_replica_count" {
   type    = number
   default = 3

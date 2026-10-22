@@ -129,36 +129,22 @@ module "neo4j" {
   depends_on = [module.nginx_ingress]
 }
 
-# ── KEDA (event-driven autoscaler) ───────────────────────────────────────────
-# Always deployed — used to scale ekai-erd-worker based on Redis queue
-# length. Runs independently of anything else; KEDA ScaledObjects in the
-# ekai-saas chart are simply inactive until Redis is available. Without this,
-# the chart's ScaledObject custom resources have no controller to act on
-# them at all -- erd-worker would be stuck at whatever fixed replica count
-# the chart's base Deployment spec sets, with no actual autoscaling. This
-# repo's own devops/azure-terraform origin never had KEDA installed at all
-# (a real gap, not a deliberate decision) -- ported from
-# terraform-aws-ekai/terraform-google-ekai's modules/platform, both of which
-# already install this unconditionally.
-resource "kubernetes_namespace" "keda" {
-  metadata {
-    name = "keda"
-  }
-  depends_on = [module.nginx_ingress]
-}
-
-resource "helm_release" "keda" {
-  name             = "keda"
-  repository       = "https://kedacore.github.io/charts"
-  chart            = "keda"
-  version          = var.keda_chart_version
-  namespace        = kubernetes_namespace.keda.metadata[0].name
-  create_namespace = false
-  timeout          = 600
-  cleanup_on_fail  = true
-
-  depends_on = [kubernetes_namespace.keda]
-}
+# ── KEDA ──────────────────────────────────────────────────────────────────
+# NOT installed here, unlike terraform-aws-ekai/terraform-google-ekai's
+# platform modules (which both install their own helm_release.keda) --
+# confirmed LIVE (real apply against a real AKS cluster) that AKS already
+# runs KEDA as a native managed add-on whenever
+# workload_autoscaler_profile.keda_enabled = true is set on the cluster
+# (see modules/aks/main.tf -- already true in the original
+# devops/azure-terraform source, before this repo existed). A second,
+# separately-Helm-installed KEDA collides with AKS's own
+# "aks-managed-keda" release over cluster-scoped CRDs
+# (cloudeventsources.eventing.keda.sh, etc.) and fails outright:
+# "CustomResourceDefinition ... exists and cannot be imported ... current
+# value is 'aks-managed-keda'". EKS/GKE have no equivalent native
+# integration, which is why AWS/GCP's self-service distros need to install
+# KEDA themselves -- Azure's own managed add-on already covers the same
+# ekai-saas chart ScaledObject use case with nothing further needed here.
 
 # ── MinIO (distributed mode + bucket Job, images mirrored to ACR) ──────────
 module "minio" {

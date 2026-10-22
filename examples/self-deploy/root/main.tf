@@ -112,7 +112,6 @@ module "infra" {
   redis_chart_version                 = var.redis_chart_version
   reloader_chart_version              = var.reloader_chart_version
   eso_chart_version                   = var.eso_chart_version
-  keda_chart_version                  = var.keda_chart_version
   redis_replica_count                 = var.redis_replica_count
   redis_persistence_size              = var.redis_persistence_size
   redis_storage_class                 = var.redis_storage_class

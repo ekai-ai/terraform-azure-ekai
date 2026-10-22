@@ -184,8 +184,20 @@ resource "helm_release" "minio" {
 
 # ── Bucket provisioning job (replaces unsupported defaultBuckets) ─────────────
 # Distributed mode doesn't accept `defaultBuckets`. We run a one-shot Job
-# post-Helm-install that uses `mc` (MinIO client) to create each bucket.
-# Idempotent: `mc mb --ignore-existing` returns 0 if bucket already exists.
+# post-Helm-install to create each bucket. Idempotent: checks existence via
+# `s3api head-bucket` first, same effect as `mc mb --ignore-existing`.
+#
+# Uses the AWS CLI against MinIO's S3-compatible API, NOT the `minio/mc`
+# client image this originally used -- confirmed live that MinIO Inc. has
+# restricted anonymous pulls of their own client image on BOTH Docker Hub
+# (`minio/mc`, including :latest, not just the old pinned RELEASE tag --
+# "pull access denied ... insufficient_scope") AND quay.io
+# (`quay.io/minio/mc`, "401 Unauthorized") -- this isn't a stale-tag problem
+# fixable by bumping the version, the whole free distribution channel for
+# that image is gone. `amazon/aws-cli` is a well-maintained, freely pullable
+# Docker Hub image (confirmed live) whose `aws s3`/`s3api` subcommands work
+# against any S3-compatible endpoint, MinIO included -- dummy credentials
+# and --endpoint-url are enough, no real AWS account involved.
 resource "kubernetes_job" "minio_buckets" {
   metadata {
     name      = "minio-bucket-init"
@@ -201,22 +213,25 @@ resource "kubernetes_job" "minio_buckets" {
       spec {
         restart_policy = "OnFailure"
         container {
-          name    = "mc"
-          image   = "minio/mc:RELEASE.2024-10-29T15-34-59Z"
+          name    = "awscli"
+          image   = "amazon/aws-cli:latest"
           command = ["/bin/sh", "-c"]
           args = [
             <<-EOT
               set -eu
-              mc alias set local http://minio.${var.minio_namespace}.svc.cluster.local:9000 \
-                "$ROOT_USER" "$ROOT_PASSWORD"
+              ENDPOINT="http://minio.${var.minio_namespace}.svc.cluster.local:9000"
               for B in ${join(" ", var.default_buckets)}; do
-                mc mb --ignore-existing "local/$B"
-                echo "✅ bucket ready: $B"
+                if aws --endpoint-url="$ENDPOINT" s3api head-bucket --bucket "$B" >/dev/null 2>&1; then
+                  echo "bucket already exists: $B"
+                else
+                  aws --endpoint-url="$ENDPOINT" s3 mb "s3://$B"
+                  echo "bucket created: $B"
+                fi
               done
             EOT
           ]
           env {
-            name = "ROOT_USER"
+            name = "AWS_ACCESS_KEY_ID"
             value_from {
               secret_key_ref {
                 name = "minio"
@@ -225,13 +240,17 @@ resource "kubernetes_job" "minio_buckets" {
             }
           }
           env {
-            name = "ROOT_PASSWORD"
+            name = "AWS_SECRET_ACCESS_KEY"
             value_from {
               secret_key_ref {
                 name = "minio"
                 key  = "root-password"
               }
             }
+          }
+          env {
+            name  = "AWS_DEFAULT_REGION"
+            value = "us-east-1"
           }
         }
       }

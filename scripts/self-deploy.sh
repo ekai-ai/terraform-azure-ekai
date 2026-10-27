@@ -13,9 +13,10 @@
 #   2. Creates the resource group everything in this env lives in
 #   3. Creates a scoped deployer Service Principal (not your own admin
 #      identity) with just the roles Terraform needs, scoped to that one
-#      resource group, plus the Entra ID "Application Developer" directory
+#      resource group, plus the Entra ID "Application Administrator" directory
 #      role (tenant-wide -- Entra ID has no resource-group-scoped
-#      equivalent -- needed for modules/key_vault's azuread_application.eso,
+#      equivalent -- needed for modules/key_vault's azuread_application.eso /
+#      azuread_service_principal.eso / azuread_application_federated_identity_credential.eso,
 #      which plain Azure RBAC "Owner" does not cover), and a client secret
 #      for it
 #   4. Initializes the Terraform state backend (storage account + container)
@@ -226,24 +227,35 @@ echo
 # Azure RBAC ("Owner" above) and Entra ID directory roles are two entirely
 # separate permission systems -- Owner on this resource group does NOT let
 # the SP create Azure AD objects. modules/key_vault/main.tf's
-# azuread_application.eso (ESO's workload identity app registration) needs
-# actual Entra ID application-creation rights, which only a directory role
-# grants -- confirmed live: without this, that resource fails deep into the
-# apply with "403 Insufficient privileges to complete the operation."
-# "Application Developer" is the narrowest built-in Entra role that covers
-# it (lets a principal create and manage app registrations/service
-# principals it owns) -- there's no resource-group-scoped equivalent, Entra
-# ID directory roles are always tenant-wide, unlike Azure RBAC.
+# azuread_application.eso / azuread_service_principal.eso /
+# azuread_application_federated_identity_credential.eso (ESO's workload
+# identity) need actual Entra ID rights, which only a directory role grants
+# -- confirmed live: without this, those resources fail deep into the apply
+# with "403 Insufficient privileges to complete the operation."
+#
+# "Application Developer" (tried first) is NOT enough, despite looking like
+# the narrowest fit on paper: it only grants createAsOwner-scoped rights,
+# which Microsoft Graph only honors in a *delegated* (signed-in user)
+# context. This deployer runs as a service principal using its own
+# app-only credentials (client credentials flow, no delegated user behind
+# it), and in that context Graph rejects azuread_service_principal.eso with
+# "Authorization_RequestDenied: ... the backing application of the service
+# principal being created must in the local tenant" even though the app IS
+# local -- confirmed live on the aztest env. "Application Administrator"
+# grants full (non-owner-scoped) rights over every app registration and
+# service principal in the tenant, which Graph does honor for an app-only
+# caller -- there's still no resource-group-scoped equivalent, Entra ID
+# directory roles are always tenant-wide, unlike Azure RBAC.
 #
 # `az role assignment create` above is Azure RBAC only; directory role
 # assignment is a different system, reached here via Microsoft Graph
 # directly since the `az ad sp`/`az role` surfaces don't expose it.
-# cf1c38e5-3621-4004-a7cb-879624dced7c is "Application Developer"'s fixed,
-# well-known built-in role template ID (same value in every tenant).
-echo "==> Granting Entra ID 'Application Developer' role to ${SP_NAME} (needed to create the ESO app registration)..."
-APP_DEV_ROLE_ID="cf1c38e5-3621-4004-a7cb-879624dced7c"
+# 9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3 is "Application Administrator"'s
+# fixed, well-known built-in role template ID (same value in every tenant).
+echo "==> Granting Entra ID 'Application Administrator' role to ${SP_NAME} (needed to create the ESO app registration + service principal)..."
+APP_ADMIN_ROLE_ID="9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3"
 ALREADY_ASSIGNED=$(az rest --method GET \
-  --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?\$filter=principalId eq '${SP_OBJECT_ID}' and roleDefinitionId eq '${APP_DEV_ROLE_ID}'" \
+  --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?\$filter=principalId eq '${SP_OBJECT_ID}' and roleDefinitionId eq '${APP_ADMIN_ROLE_ID}'" \
   --query "value[0].id" -o tsv 2>/dev/null || echo "")
 if [[ -n "${ALREADY_ASSIGNED}" ]]; then
   echo "==> Already granted (reusing an existing SP) -- continuing."
@@ -251,18 +263,18 @@ else
   for attempt in $(seq 1 5); do
     if az rest --method POST \
       --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments" \
-      --body "{\"principalId\": \"${SP_OBJECT_ID}\", \"roleDefinitionId\": \"${APP_DEV_ROLE_ID}\", \"directoryScopeId\": \"/\"}" >/dev/null 2>&1; then
+      --body "{\"principalId\": \"${SP_OBJECT_ID}\", \"roleDefinitionId\": \"${APP_ADMIN_ROLE_ID}\", \"directoryScopeId\": \"/\"}" >/dev/null 2>&1; then
       break
     fi
     if [[ "${attempt}" -eq 5 ]]; then
-      echo "ERROR: failed to grant the Application Developer Entra ID role to ${SP_NAME} after 5 attempts."
+      echo "ERROR: failed to grant the Application Administrator Entra ID role to ${SP_NAME} after 5 attempts."
       echo "This needs the identity running this script to have Entra ID admin rights (e.g. Global Administrator or Privileged Role Administrator), not just Azure subscription-level rights -- check that first."
       exit 1
     fi
     sleep $((attempt * 3))
   done
 fi
-echo "✓ Application Developer role granted to ${SP_NAME}."
+echo "✓ Application Administrator role granted to ${SP_NAME}."
 echo
 
 # ── Step 3 — State backend ────────────────────────────────────────────────────

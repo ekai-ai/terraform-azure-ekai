@@ -90,6 +90,25 @@ az account set --subscription "${SUBSCRIPTION_ID}"
 # reasoning as AWS/GCP's scripts: a second run of this script shouldn't
 # start already authenticated as last run's narrowly-scoped deployer SP.
 ORIGINAL_ACCOUNT=$(az account show --query user.name -o tsv 2>/dev/null || echo "")
+ORIGINAL_ACCOUNT_TYPE=$(az account show --query user.type -o tsv 2>/dev/null || echo "")
+
+# Fail fast here instead of deep into Step 3 with a confusing "Insufficient
+# privileges" on `az ad sp create-for-rbac`/`credential reset` -- confirmed
+# live: the most common way to land here is a PREVIOUS run of this script
+# against a different env, whose exit trap switched the local az CLI to
+# that env's scoped deployer SP (Owner on just its one resource group,
+# nothing in Entra ID) and the next run was kicked off without logging back
+# in first. A legitimate human admin login always shows user.type "user" --
+# "servicePrincipal" here means this is almost certainly that leftover
+# narrow identity, not a real admin.
+if [[ "${ORIGINAL_ACCOUNT_TYPE}" == "servicePrincipal" ]]; then
+  echo "ERROR: az is currently authenticated as a service principal (${ORIGINAL_ACCOUNT})."
+  echo "This is almost always last run's scoped deployer SP, left active by a"
+  echo "previous self-deploy.sh/self-deploy-destroy.sh run on a different env --"
+  echo "it only has Owner on that one env's resource group, nothing else."
+  echo "Run 'az login' with your own admin account first, then re-run this script."
+  exit 1
+fi
 
 echo "==> Subscription: ${SUBSCRIPTION_ID}"
 echo "==> Region:       ${REGION}"

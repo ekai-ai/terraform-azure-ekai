@@ -269,9 +269,9 @@ variable "acme_email" {
 }
 
 variable "cluster_issuer_name" {
-  description = "Which ClusterIssuer the wildcard Certificate uses — \"letsencrypt-staging\" (default, avoids Let's Encrypt's production rate limit during repeated apply/destroy cycles) or \"letsencrypt-prod\" for a real cutover."
+  description = "Which ClusterIssuer the wildcard Certificate uses — \"letsencrypt-prod\" (default, a real browser-trusted cert) or \"letsencrypt-staging\" to avoid Let's Encrypt's production rate limit during repeated apply/destroy test cycles."
   type        = string
-  default     = "letsencrypt-staging"
+  default     = "letsencrypt-prod"
 }
 
 variable "redis_namespace" {

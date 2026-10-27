@@ -104,12 +104,12 @@ argocd_namespace = "argocd"
 # Redis and Neo4j are always deployed (no enable_redis/enable_neo4j toggle in
 # this repo) — the ekai-saas chart's ERD/KEDA features need both.
 
-# Let's Encrypt registration email + which ClusterIssuer to actually use.
-# Staging avoids burning the production rate limit (5 duplicate certs/week
-# per domain) while testing an apply/destroy cycle -- switch to
-# "letsencrypt-prod" once you're done testing and ready for a real cutover.
-acme_email          = "devops@ekai.ai"
-cluster_issuer_name = "letsencrypt-staging"
+# Let's Encrypt registration email. cluster_issuer_name defaults to
+# "letsencrypt-prod" (a real, browser-trusted cert) -- left unset here. Only
+# override it to "letsencrypt-staging" in a throwaway test env's own tfvars,
+# to avoid burning the production rate limit (5 duplicate certs/week per
+# domain) across repeated apply/destroy cycles.
+acme_email = "devops@ekai.ai"
 
 # minio_persistence_size default (50Gi) x minio_replicas default (4) = 200Gi
 # total provisioned storage.

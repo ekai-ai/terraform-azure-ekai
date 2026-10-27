@@ -248,13 +248,29 @@ export ARM_CLIENT_SECRET="${CLIENT_SECRET}"
 export ARM_TENANT_ID="${TENANT_ID}"
 export ARM_SUBSCRIPTION_ID="${SUBSCRIPTION_ID}"
 
-# Restore whatever identity was active before this script ran, no matter how
-# it exits (success, error, Ctrl-C) -- the ARM_* env vars above only affect
-# Terraform's own provider auth, not `az` itself, but `az login`'s token
-# cache is still ambient state worth not disturbing beyond this script's run.
-if [[ -n "${ORIGINAL_ACCOUNT}" ]]; then
-  trap 'az account set --subscription "${SUBSCRIPTION_ID}" >/dev/null 2>&1 || true' EXIT
-fi
+# `az login --service-principal` below permanently switches the LOCAL az CLI
+# session to the deployer SP -- it's not scoped to this script's process, and
+# unlike the ARM_* env vars above (which only affect Terraform's own provider
+# auth), there's no way to silently restore an interactive human login here
+# (ORIGINAL_ACCOUNT for a browser/device-code login isn't a credential this
+# script can log back in with -- that needs a real interactive flow, which
+# has no business popping up unannounced in an exit trap). All this can
+# safely do is select the subscription back and warn clearly that the
+# switch happened, on every exit path (success, error, Ctrl-C) -- confirmed
+# live: without this, a later `az`/`terraform` command run under the
+# assumption of still being the original identity fails with a confusing
+# 403 "Insufficient privileges" (the deployer SP has Owner on just this one
+# resource group, nothing in Entra ID) instead of a clear "you're logged in
+# as the wrong identity" pointer.
+restore_subscription_and_warn() {
+  az account set --subscription "${SUBSCRIPTION_ID}" >/dev/null 2>&1 || true
+  echo ""
+  echo "⚠ Your local az CLI is now authenticated as the deployer service principal"
+  echo "  (${SP_NAME}), not your original identity (${ORIGINAL_ACCOUNT:-<unknown>})."
+  echo "  It only has Owner on this one resource group -- nothing in Entra ID."
+  echo "  Run 'az login' again before using az/terraform under your own account."
+}
+trap restore_subscription_and_warn EXIT
 
 echo "==> Waiting for the new credential to propagate..."
 for i in $(seq 1 20); do

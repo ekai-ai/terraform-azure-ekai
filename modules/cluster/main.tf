@@ -93,6 +93,24 @@ module "aks" {
   depends_on = [time_sleep.wait_for_la_workspace_propagation]
 }
 
+# Wait for AKS's API server to actually become reliably reachable before the
+# platform submodule's kubernetes/helm/kubectl-backed resources hammer it --
+# confirmed live: right after azurerm_kubernetes_cluster reports Succeeded,
+# the API server can still answer the first wave of real calls (Helm's
+# pre-install OpenAPI schema discovery is a heavy one) with "context deadline
+# exceeded" / "http2: client connection lost" for a short window, even though
+# module.cluster's outputs (aks_host, certs, ...) are already known -- same
+# class of race as the LA workspace sleep above, just at the control-plane
+# level instead of a specific RP lookup. Non-deterministic: doesn't reproduce
+# on every apply, which is exactly why it needs a sleep rather than being
+# "probably fine." module.platform's root-level `depends_on = [module.cluster]`
+# (see ../../main.tf) already waits for every resource in this module,
+# including this one, before touching anything Helm/kubectl-based.
+resource "time_sleep" "wait_for_aks_api_propagation" {
+  depends_on      = [module.aks]
+  create_duration = "60s"
+}
+
 # ── Key Vault + ESO identity (creates the vault, admin RBAC, a user-assigned
 #    managed identity, federated cred, role) ──────────────────────────────
 # Provisioned here (not in the bootstrap submodule) because the ESO

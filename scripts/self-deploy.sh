@@ -13,7 +13,11 @@
 #   2. Creates the resource group everything in this env lives in
 #   3. Creates a scoped deployer Service Principal (not your own admin
 #      identity) with just the roles Terraform needs, scoped to that one
-#      resource group, and a client secret for it
+#      resource group, plus the Entra ID "Application Developer" directory
+#      role (tenant-wide -- Entra ID has no resource-group-scoped
+#      equivalent -- needed for modules/key_vault's azuread_application.eso,
+#      which plain Azure RBAC "Owner" does not cover), and a client secret
+#      for it
 #   4. Initializes the Terraform state backend (storage account + container)
 #   5. Optionally runs the actual Terraform deploy — 2 applies (repo root,
 #      then cicd/; down from the original 4 separate layers, but not all the
@@ -26,8 +30,10 @@
 # Terraform — no master Key Vault secret to pre-seed, no password prompts
 # here.
 #
-# Requires: az (authenticated with subscription-level rights), kubectl, jq,
-#           dig, terraform.
+# Requires: az (authenticated with subscription-level rights AND Entra ID
+#           admin rights -- e.g. Global Administrator or Privileged Role
+#           Administrator -- to grant the directory role in step 3 above),
+#           kubectl, jq, dig, terraform.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -196,9 +202,13 @@ fi
 # radius contained to this one deployment, same spirit as AWS/GCP's scoped
 # deployer identities even though Azure's RBAC role catalog doesn't offer an
 # equivalently narrow predefined role for "can create role assignments."
+#
+# Captured once here, reused below for the Entra ID role grant too.
+SP_OBJECT_ID=$(az ad sp show --id "${APP_ID}" --query id -o tsv)
+
 for attempt in $(seq 1 5); do
   if az role assignment create \
-    --assignee-object-id "$(az ad sp show --id "${APP_ID}" --query id -o tsv)" \
+    --assignee-object-id "${SP_OBJECT_ID}" \
     --assignee-principal-type ServicePrincipal \
     --role "Owner" \
     --scope "${RG_ID}" >/dev/null 2>&1; then
@@ -211,6 +221,48 @@ for attempt in $(seq 1 5); do
   sleep $((attempt * 3))
 done
 echo "✓ Owner on ${RESOURCE_GROUP_NAME} granted to ${SP_NAME}."
+echo
+
+# Azure RBAC ("Owner" above) and Entra ID directory roles are two entirely
+# separate permission systems -- Owner on this resource group does NOT let
+# the SP create Azure AD objects. modules/key_vault/main.tf's
+# azuread_application.eso (ESO's workload identity app registration) needs
+# actual Entra ID application-creation rights, which only a directory role
+# grants -- confirmed live: without this, that resource fails deep into the
+# apply with "403 Insufficient privileges to complete the operation."
+# "Application Developer" is the narrowest built-in Entra role that covers
+# it (lets a principal create and manage app registrations/service
+# principals it owns) -- there's no resource-group-scoped equivalent, Entra
+# ID directory roles are always tenant-wide, unlike Azure RBAC.
+#
+# `az role assignment create` above is Azure RBAC only; directory role
+# assignment is a different system, reached here via Microsoft Graph
+# directly since the `az ad sp`/`az role` surfaces don't expose it.
+# cf1c38e5-3621-4004-a7cb-879624dced7c is "Application Developer"'s fixed,
+# well-known built-in role template ID (same value in every tenant).
+echo "==> Granting Entra ID 'Application Developer' role to ${SP_NAME} (needed to create the ESO app registration)..."
+APP_DEV_ROLE_ID="cf1c38e5-3621-4004-a7cb-879624dced7c"
+ALREADY_ASSIGNED=$(az rest --method GET \
+  --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?\$filter=principalId eq '${SP_OBJECT_ID}' and roleDefinitionId eq '${APP_DEV_ROLE_ID}'" \
+  --query "value[0].id" -o tsv 2>/dev/null || echo "")
+if [[ -n "${ALREADY_ASSIGNED}" ]]; then
+  echo "==> Already granted (reusing an existing SP) -- continuing."
+else
+  for attempt in $(seq 1 5); do
+    if az rest --method POST \
+      --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments" \
+      --body "{\"principalId\": \"${SP_OBJECT_ID}\", \"roleDefinitionId\": \"${APP_DEV_ROLE_ID}\", \"directoryScopeId\": \"/\"}" >/dev/null 2>&1; then
+      break
+    fi
+    if [[ "${attempt}" -eq 5 ]]; then
+      echo "ERROR: failed to grant the Application Developer Entra ID role to ${SP_NAME} after 5 attempts."
+      echo "This needs the identity running this script to have Entra ID admin rights (e.g. Global Administrator or Privileged Role Administrator), not just Azure subscription-level rights -- check that first."
+      exit 1
+    fi
+    sleep $((attempt * 3))
+  done
+fi
+echo "✓ Application Developer role granted to ${SP_NAME}."
 echo
 
 # ── Step 3 — State backend ────────────────────────────────────────────────────

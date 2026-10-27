@@ -78,22 +78,33 @@ resource "azurerm_role_assignment" "kv_secrets_officer_extra" {
 # ESO running inside AKS reads Key Vault secrets and syncs them into native
 # Kubernetes Secret objects. We use AKS Workload Identity (OIDC federation) —
 # no static secrets, no client-secret in the cluster.
+#
+# A user-assigned managed identity (UAMI), not an Entra app registration +
+# service principal: same OIDC-federated workload identity pattern already
+# proven live elsewhere in this repo (modules/aks's cert_manager_uami,
+# modules/app_workload_identity's per-service identities), using only plain
+# Azure RBAC. An azuread_application/azuread_service_principal needs a
+# tenant-wide Entra ID directory role (e.g. "Application Administrator") just
+# to create them -- a broad, compliance-sensitive ask for a real customer's
+# tenant, and entirely avoidable here: a UAMI is an ARM resource, created and
+# role-assigned with the same resource-group-scoped "Owner" RBAC grant the
+# deployer SP already has for everything else in this repo.
 # ═════════════════════════════════════════════════════════════════════════════
 
-resource "azuread_application" "eso" {
-  display_name = "ekai-eso-${var.env_name}"
+resource "azurerm_user_assigned_identity" "eso" {
+  name                = "${var.env_name}-eso-uami"
+  resource_group_name = var.resource_group_name
+  location            = var.region
 }
 
-resource "azuread_service_principal" "eso" {
-  client_id = azuread_application.eso.client_id
-}
+resource "azurerm_federated_identity_credential" "eso" {
+  name                = "eso-aks-${var.env_name}"
+  resource_group_name = var.resource_group_name
+  parent_id           = azurerm_user_assigned_identity.eso.id
 
-resource "azuread_application_federated_identity_credential" "eso" {
-  application_id = azuread_application.eso.id
-  display_name   = "eso-aks-${var.env_name}"
-  audiences      = ["api://AzureADTokenExchange"]
-  issuer         = var.aks_oidc_issuer_url
-  subject        = "system:serviceaccount:${var.eso_namespace}:${var.eso_service_account_name}"
+  audience = ["api://AzureADTokenExchange"]
+  issuer   = var.aks_oidc_issuer_url
+  subject  = "system:serviceaccount:${var.eso_namespace}:${var.eso_service_account_name}"
 }
 
 # Scoped to the one master secret, not the whole vault -- see
@@ -103,9 +114,9 @@ resource "azuread_application_federated_identity_credential" "eso" {
 resource "azurerm_role_assignment" "eso_secrets_user" {
   scope                = "${azurerm_key_vault.main.id}/secrets/${var.secret_name}"
   role_definition_name = "Key Vault Secrets User"
-  principal_id         = azuread_service_principal.eso.object_id
-  # Skip the SP-AAD reachability check — newly-created SPs take 30-60s to
-  # propagate through Entra. Without skip, role assignment fails with
-  # "PrincipalNotFound" intermittently.
+  principal_id         = azurerm_user_assigned_identity.eso.principal_id
+  # Skip the SP-AAD reachability check — newly-created managed identities
+  # take 30-60s to propagate through Entra. Without skip, role assignment
+  # fails with "PrincipalNotFound" intermittently.
   skip_service_principal_aad_check = true
 }

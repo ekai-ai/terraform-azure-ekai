@@ -19,6 +19,6 @@ output "tenant_id" {
 }
 
 output "eso_client_id" {
-  description = "Client ID of the Entra ID app for ESO workload identity. The external_secrets module annotates the ESO ServiceAccount with this."
-  value       = azuread_application.eso.client_id
+  description = "Client ID of the user-assigned managed identity for ESO workload identity. The external_secrets module annotates the ESO ServiceAccount with this."
+  value       = azurerm_user_assigned_identity.eso.client_id
 }

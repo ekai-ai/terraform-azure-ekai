@@ -137,3 +137,9 @@ helm_chart_version  = "*"
 # to 24 chars) — left as default.
 # tls_name defaults to "<env_name>-ekai-wildcard-tls" — left as default.
 # shared_service_account_name defaults to "ekai-app-sa" — left as default.
+# purge_vault_on_destroy defaults to false — left as default. A destroy
+# leaves the Key Vault soft-deleted for Azure's normal 7-day window instead
+# of purging it immediately, so no extra Azure permission is needed. Only
+# set this to true for internal fast destroy/reapply test loops, which also
+# requires granting the deployer SP a subscription-scoped custom RBAC role
+# (see scripts/self-deploy.sh) — not something to ask a real customer for.

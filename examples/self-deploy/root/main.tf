@@ -35,10 +35,6 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.9.0"
     }
-    azuread = {
-      source  = "hashicorp/azuread"
-      version = "~> 3.0"
-    }
     random = {
       source  = "hashicorp/random"
       version = "~> 3.6"
@@ -66,6 +62,7 @@ module "infra" {
   source = "../../.."
 
   subscription_id                     = var.subscription_id
+  purge_vault_on_destroy              = var.purge_vault_on_destroy
   region                              = var.region
   env_name                            = var.env_name
   resource_group_name                 = var.resource_group_name

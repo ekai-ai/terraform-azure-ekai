@@ -12,13 +12,14 @@
 #      subscription-level rights throughout)
 #   2. Creates the resource group everything in this env lives in
 #   3. Creates a scoped deployer Service Principal (not your own admin
-#      identity) with just the roles Terraform needs, scoped to that one
-#      resource group, plus the Entra ID "Application Administrator" directory
-#      role (tenant-wide -- Entra ID has no resource-group-scoped
-#      equivalent -- needed for modules/key_vault's azuread_application.eso /
-#      azuread_service_principal.eso / azuread_application_federated_identity_credential.eso,
-#      which plain Azure RBAC "Owner" does not cover), and a client secret
-#      for it
+#      identity) with just the roles Terraform needs -- "Owner" scoped to
+#      that one resource group, plus a client secret for it. Only when
+#      purge_vault_on_destroy = true in the target env's tfvars (internal
+#      fast destroy/reapply test loops, never the customer default) does it
+#      also grant a minimal subscription-scoped custom role for purging a
+#      soft-deleted Key Vault. No Entra ID directory role is needed at all --
+#      ESO's workload identity is a plain user-assigned managed identity
+#      (modules/key_vault), not an Entra app registration.
 #   4. Initializes the Terraform state backend (storage account + container)
 #   5. Optionally runs the actual Terraform deploy — 2 applies (repo root,
 #      then cicd/; down from the original 4 separate layers, but not all the
@@ -31,10 +32,9 @@
 # Terraform — no master Key Vault secret to pre-seed, no password prompts
 # here.
 #
-# Requires: az (authenticated with subscription-level rights AND Entra ID
-#           admin rights -- e.g. Global Administrator or Privileged Role
-#           Administrator -- to grant the directory role in step 3 above),
-#           kubectl, jq, dig, terraform.
+# Requires: az (authenticated with subscription-level rights -- no Entra ID
+#           directory role needed, only Azure RBAC), kubectl, jq, dig,
+#           terraform.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -204,7 +204,8 @@ fi
 # deployer identities even though Azure's RBAC role catalog doesn't offer an
 # equivalently narrow predefined role for "can create role assignments."
 #
-# Captured once here, reused below for the Entra ID role grant too.
+# Captured once here, reused below for the Key Vault purge role grant when
+# purge_vault_on_destroy = true.
 SP_OBJECT_ID=$(az ad sp show --id "${APP_ID}" --query id -o tsv)
 
 for attempt in $(seq 1 5); do
@@ -224,57 +225,69 @@ done
 echo "✓ Owner on ${RESOURCE_GROUP_NAME} granted to ${SP_NAME}."
 echo
 
-# Azure RBAC ("Owner" above) and Entra ID directory roles are two entirely
-# separate permission systems -- Owner on this resource group does NOT let
-# the SP create Azure AD objects. modules/key_vault/main.tf's
-# azuread_application.eso / azuread_service_principal.eso /
-# azuread_application_federated_identity_credential.eso (ESO's workload
-# identity) need actual Entra ID rights, which only a directory role grants
-# -- confirmed live: without this, those resources fail deep into the apply
-# with "403 Insufficient privileges to complete the operation."
+# Key Vault purge role -- only when purge_vault_on_destroy = true in this
+# env's tfvars (internal fast destroy/reapply test loops; see variables.tf's
+# description of that variable). Left unset/false, this whole block is
+# skipped -- the expected, default customer path, and it asks for nothing
+# beyond the resource-group "Owner" grant above.
 #
-# "Application Developer" (tried first) is NOT enough, despite looking like
-# the narrowest fit on paper: it only grants createAsOwner-scoped rights,
-# which Microsoft Graph only honors in a *delegated* (signed-in user)
-# context. This deployer runs as a service principal using its own
-# app-only credentials (client credentials flow, no delegated user behind
-# it), and in that context Graph rejects azuread_service_principal.eso with
-# "Authorization_RequestDenied: ... the backing application of the service
-# principal being created must in the local tenant" even though the app IS
-# local -- confirmed live on the aztest env. "Application Administrator"
-# grants full (non-owner-scoped) rights over every app registration and
-# service principal in the tenant, which Graph does honor for an app-only
-# caller -- there's still no resource-group-scoped equivalent, Entra ID
-# directory roles are always tenant-wide, unlike Azure RBAC.
-#
-# `az role assignment create` above is Azure RBAC only; directory role
-# assignment is a different system, reached here via Microsoft Graph
-# directly since the `az ad sp`/`az role` surfaces don't expose it.
-# 9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3 is "Application Administrator"'s
-# fixed, well-known built-in role template ID (same value in every tenant).
-echo "==> Granting Entra ID 'Application Administrator' role to ${SP_NAME} (needed to create the ESO app registration + service principal)..."
-APP_ADMIN_ROLE_ID="9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3"
-ALREADY_ASSIGNED=$(az rest --method GET \
-  --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?\$filter=principalId eq '${SP_OBJECT_ID}' and roleDefinitionId eq '${APP_ADMIN_ROLE_ID}'" \
-  --query "value[0].id" -o tsv 2>/dev/null || echo "")
-if [[ -n "${ALREADY_ASSIGNED}" ]]; then
-  echo "==> Already granted (reusing an existing SP) -- continuing."
+# Why this needs its own role instead of just being covered by "Owner" on
+# the resource group: Microsoft.KeyVault/locations/deletedVaults is a
+# region-level collection, not a resource-group-scoped one -- its ARM ID
+# (/subscriptions/<sub>/providers/Microsoft.KeyVault/locations/<region>/
+# deletedVaults/<name>) has no resource-group segment anywhere in it, so
+# "purge" can only ever be granted at subscription scope or higher, never
+# narrower. Rather than hand the deployer SP subscription-level "Owner" (or
+# any built-in role broad enough to cover this), we create the narrowest
+# possible custom role -- just the two Actions below, nothing else -- and
+# grant only that at subscription scope. This role only needs to exist once
+# per subscription, not once per env, so creating it is idempotent across
+# repeated runs.
+PURGE_VAULT_ON_DESTROY=$(grep -E '^purge_vault_on_destroy[[:space:]]*=' "${TFVARS}" | head -1 | sed 's/.*=[[:space:]]*\(true\|false\).*/\1/' || true)
+if [[ "${PURGE_VAULT_ON_DESTROY}" == "true" ]]; then
+  echo "==> purge_vault_on_destroy = true -- granting the subscription-scoped Key Vault purge role..."
+  PURGE_ROLE_NAME="Ekai Key Vault Purge (self-service)"
+
+  EXISTING_ROLE=$(az role definition list --name "${PURGE_ROLE_NAME}" --scope "/subscriptions/${SUBSCRIPTION_ID}" --query "[0].name" -o tsv 2>/dev/null || echo "")
+  if [[ -n "${EXISTING_ROLE}" && "${EXISTING_ROLE}" != "null" ]]; then
+    echo "==> Custom role '${PURGE_ROLE_NAME}' already exists in this subscription -- reusing."
+  else
+    echo "==> Creating custom role '${PURGE_ROLE_NAME}'..."
+    az role definition create --role-definition "{
+      \"Name\": \"${PURGE_ROLE_NAME}\",
+      \"Description\": \"Minimum rights to read and purge a soft-deleted Key Vault -- this Azure resource type has no resource-group-scoped equivalent, only subscription scope or higher.\",
+      \"Actions\": [
+        \"Microsoft.KeyVault/locations/deletedVaults/read\",
+        \"Microsoft.KeyVault/locations/deletedVaults/purge/action\"
+      ],
+      \"NotActions\": [],
+      \"AssignableScopes\": [\"/subscriptions/${SUBSCRIPTION_ID}\"]
+    }" >/dev/null
+  fi
+
+  ALREADY_ASSIGNED=$(az role assignment list --assignee "${SP_OBJECT_ID}" --role "${PURGE_ROLE_NAME}" --scope "/subscriptions/${SUBSCRIPTION_ID}" --query "[0].id" -o tsv 2>/dev/null || echo "")
+  if [[ -n "${ALREADY_ASSIGNED}" ]]; then
+    echo "==> Already granted (reusing an existing SP) -- continuing."
+  else
+    for attempt in $(seq 1 5); do
+      if az role assignment create \
+        --assignee-object-id "${SP_OBJECT_ID}" \
+        --assignee-principal-type ServicePrincipal \
+        --role "${PURGE_ROLE_NAME}" \
+        --scope "/subscriptions/${SUBSCRIPTION_ID}" >/dev/null 2>&1; then
+        break
+      fi
+      if [[ "${attempt}" -eq 5 ]]; then
+        echo "ERROR: failed to grant '${PURGE_ROLE_NAME}' on /subscriptions/${SUBSCRIPTION_ID} to ${SP_NAME} after 5 attempts."
+        exit 1
+      fi
+      sleep $((attempt * 3))
+    done
+  fi
+  echo "✓ Key Vault purge role granted to ${SP_NAME}."
 else
-  for attempt in $(seq 1 5); do
-    if az rest --method POST \
-      --url "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments" \
-      --body "{\"principalId\": \"${SP_OBJECT_ID}\", \"roleDefinitionId\": \"${APP_ADMIN_ROLE_ID}\", \"directoryScopeId\": \"/\"}" >/dev/null 2>&1; then
-      break
-    fi
-    if [[ "${attempt}" -eq 5 ]]; then
-      echo "ERROR: failed to grant the Application Administrator Entra ID role to ${SP_NAME} after 5 attempts."
-      echo "This needs the identity running this script to have Entra ID admin rights (e.g. Global Administrator or Privileged Role Administrator), not just Azure subscription-level rights -- check that first."
-      exit 1
-    fi
-    sleep $((attempt * 3))
-  done
+  echo "==> purge_vault_on_destroy not set to true -- skipping the subscription-scoped Key Vault purge role (default, expected for customer deployments)."
 fi
-echo "✓ Application Administrator role granted to ${SP_NAME}."
 echo
 
 # ── Step 3 — State backend ────────────────────────────────────────────────────

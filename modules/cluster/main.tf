@@ -93,11 +93,11 @@ module "aks" {
   depends_on = [time_sleep.wait_for_la_workspace_propagation]
 }
 
-# ── Key Vault + ESO identity (creates the vault, admin RBAC, Entra app,
-#    federated cred, role) ───────────────────────────────────────────────
+# ── Key Vault + ESO identity (creates the vault, admin RBAC, a user-assigned
+#    managed identity, federated cred, role) ──────────────────────────────
 # Provisioned here (not in the bootstrap submodule) because the ESO
 # federated credential needs AKS's oidc_issuer_url, only available once AKS
-# exists. The platform submodule consumes the ESO app's client_id to
+# exists. The platform submodule consumes the ESO identity's client_id to
 # annotate the ESO ServiceAccount it creates via Helm.
 module "key_vault" {
   source              = "../key_vault"

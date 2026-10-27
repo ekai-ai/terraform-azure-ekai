@@ -1,18 +1,19 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Root providers (bootstrap + cluster + platform) — required_providers is the
 # union of what THESE 3 submodules' trees actually use. Provider
-# *configuration* blocks (provider "azurerm" {}, "azuread" {}, "kubernetes" {},
-# "helm" {}, "kubectl" {}) live here — the bootstrap/cluster/platform
-# submodules cannot declare their own provider config, only require providers
-# via their own required_providers block (kept in each modules/<name>/
-# providers.tf for documentation).
+# *configuration* blocks (provider "azurerm" {}, "kubernetes" {}, "helm" {},
+# "kubectl" {}) live here — the bootstrap/cluster/platform submodules cannot
+# declare their own provider config, only require providers via their own
+# required_providers block (kept in each modules/<name>/providers.tf for
+# documentation).
 #
-# provider "argocd" / "github" are intentionally NOT declared here (moved to
-# ./cicd/providers.tf instead): nothing under bootstrap/cluster/platform's
-# module tree creates an argocd_*/github_* resource — only modules/cicd does
-# (via modules/microservices_CD and modules/github_action), and that module
-# is not part of this root anymore. See main.tf's file header for the full
-# reasoning on why cicd stays a separate apply.
+# provider "argocd" / "github" / "azuread" are intentionally NOT declared
+# here (moved to ./cicd/providers.tf instead): nothing under
+# bootstrap/cluster/platform's module tree creates an
+# argocd_*/github_*/azuread_* resource — only modules/cicd does (via
+# modules/microservices_CD and modules/github_action), and that module is not
+# part of this root anymore. See main.tf's file header for the full reasoning
+# on why cicd stays a separate apply.
 #
 # required_version — >= 1.7 (the strictest of the 3 submodules' own pins;
 # modules/platform's conditional Key Vault secret `import` block needs
@@ -34,10 +35,6 @@ terraform {
     azurerm = {
       source  = "hashicorp/azurerm"
       version = "~> 4.9.0"
-    }
-    azuread = {
-      source  = "hashicorp/azuread"
-      version = "~> 3.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -70,16 +67,23 @@ provider "azurerm" {
       # with "Vault name already in use" until the 7-day retention expires.
       recover_soft_deleted_key_vaults = true
       # If a previous destroy soft-deleted the KV, purge it immediately
-      # instead of leaving it in the 7-day retention window — required for
+      # instead of leaving it in the 7-day retention window — needed for
       # self-deploy.sh/self-deploy-destroy.sh's destroy-then-reapply-same-name
-      # loop.
-      purge_soft_delete_on_destroy = true
+      # loop used in internal testing. Defaults to false: a real customer's
+      # destroy should just leave the vault soft-deleted for Azure's normal
+      # 7-day window, since the purge action can only ever be granted at
+      # subscription scope (see var.purge_vault_on_destroy's description).
+      purge_soft_delete_on_destroy = var.purge_vault_on_destroy
     }
   }
   subscription_id = var.subscription_id
 }
 
-provider "azuread" {}
+# No provider "azuread" {} here — nothing under bootstrap/cluster/platform's
+# module tree creates an azuread_* resource anymore (modules/key_vault's ESO
+# identity moved to a plain azurerm_user_assigned_identity). Only
+# modules/github_action still does, and that's part of ./cicd/'s separate
+# apply (see ./cicd/providers.tf), not this root.
 
 # Kubernetes/Helm/kubectl providers — configured from the cluster submodule's
 # own outputs. This is a same-apply "provider configured from a resource this

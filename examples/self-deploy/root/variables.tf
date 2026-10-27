@@ -18,6 +18,24 @@ variable "subscription_id" {
   type        = string
 }
 
+variable "purge_vault_on_destroy" {
+  description = <<-EOT
+    Purge a soft-deleted Key Vault immediately on destroy instead of leaving
+    it in Azure's normal 7-day soft-delete retention window.
+      false (default) — self-service/customer deployments. Destroy leaves the
+                         vault soft-deleted for 7 days, Azure's own safe
+                         default. Needs no extra Azure permission from the
+                         customer.
+      true             — internal fast destroy/reapply test loops only. Also
+                         requires granting the deployer SP a subscription-
+                         scoped custom RBAC role for the purge action (see
+                         scripts/self-deploy.sh) — that Azure resource type
+                         has no resource-group-scoped equivalent.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "region" {
   description = "Azure region (e.g. northeurope). Must match the resource group's region."
   type        = string

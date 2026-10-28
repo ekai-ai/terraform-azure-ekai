@@ -152,14 +152,33 @@ fi
 echo
 read -rp "Also delete the deployer service principal ${SP_NAME}? [y/N] " CLEAN_SP </dev/tty
 if [[ "${CLEAN_SP}" =~ ^[Yy]$ ]]; then
-  SP_ID=$(az ad sp list --display-name "${SP_NAME}" --query '[0].appId' -o tsv 2>/dev/null || echo "")
-  if [[ -n "${SP_ID}" && "${SP_ID}" != "null" ]]; then
-    az ad sp delete --id "${SP_ID}"
-    echo "  Removed ${SP_NAME}."
+  # az ad sp delete removes an Entra directory object -- it needs an Entra
+  # role (e.g. Application Administrator), which a scoped deployer SP never
+  # has (it only has Azure RBAC Owner on one resource group). The ARM_*
+  # vars above only steer Terraform's own auth; this is a plain `az` CLI
+  # call, so it uses whatever identity `az login` is currently on. If that's
+  # still a leftover deployer SP from an earlier run (this script's local
+  # az CLI identity isn't switched anywhere, so nothing catches this until
+  # now), the call fails with a bare "Insufficient privileges" -- confirmed
+  # live, 2026-10. Check up front and give an actionable message instead.
+  CURRENT_ACCOUNT_TYPE=$(az account show --query user.type -o tsv 2>/dev/null || echo "")
+  if [[ "${CURRENT_ACCOUNT_TYPE}" == "servicePrincipal" ]]; then
+    echo "  ⚠ az is currently authenticated as a service principal -- it can't delete"
+    echo "    Entra app registrations (needs an Entra role, e.g. Application"
+    echo "    Administrator, which a scoped deployer SP never has)."
+    echo "    Run 'az login' with your admin account, then remove it with:"
+    echo "      az ad sp delete --id \$(az ad sp list --display-name ${SP_NAME} --query '[0].appId' -o tsv)"
+    echo "    (leaving ${SECRETS_FILE} in place until then)"
   else
-    echo "  ${SP_NAME} not found — already removed?"
+    SP_ID=$(az ad sp list --display-name "${SP_NAME}" --query '[0].appId' -o tsv 2>/dev/null || echo "")
+    if [[ -n "${SP_ID}" && "${SP_ID}" != "null" ]]; then
+      az ad sp delete --id "${SP_ID}"
+      echo "  Removed ${SP_NAME}."
+    else
+      echo "  ${SP_NAME} not found — already removed?"
+    fi
+    rm -f "${SECRETS_FILE}"
   fi
-  rm -f "${SECRETS_FILE}"
 else
   echo "Skipped."
 fi
